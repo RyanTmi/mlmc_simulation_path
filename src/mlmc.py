@@ -1,254 +1,107 @@
 import numpy as np
-from scipy.stats import norm
+
+from model import Model
+from contract import Contract
 
 
-def black_scholes_call_price(s0, r, sigma, K, T):
-    d1 = (np.log(s0 / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-
-    call_price = s0 * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
-    return call_price
-
-
-def call_payoff(S, K):
-    return np.maximum(S - K, 0.0)
-
-
-# def sde_path(n, m, T, s, b, sigma, all_paths=True):
-#     dt = T / m
-#     dW = norm.rvs(scale=dt, size=(n, m))
-
-#     if all_paths:
-#         s = np.zeros((n, m + 1))
-#         s[:, 0] = s
-#     else:
-#         s = np.full(n, s)
-
-#     for i in range(m):
-#         if all_paths:
-#             s[:, i + 1] = s[:, i] + b(s[:, i]) * dt + sigma(s[:, i]) * dW[:, i]
-#         else:
-#             s = s + b(s) * dt + sigma(s) * dW[:, i]
-
-#     return np.linspace(0, T, m + 1), s
-
-
-# TODO: Add option to return all paths, no just the final point
-def sde_path(s: float, r: float, sigma: float, M: int, dt: np.ndarray, dW: np.ndarray):
-    S = s
-    for i in range(M):
-        S += r * S * dt + sigma * S * dW[:, i]
-
-    return S
-
-
-class MLMCEuropean:
-    def __init__(self, eps: float, max_level: int, M: int, T: float, rng: np.random.Generator):
-        self.eps = eps
+class MLMC:
+    def __init__(self, max_level: int, m: int, default_sample_count: int, rng: np.random.Generator):
         self.max_level = max_level
-        self.M = M
-        self.T = T
+        self.m = m
+        self.default_sample_count = default_sample_count
         self.rng = rng
 
-    def estimate_call_adaptative(self, s: float, r: float, sigma: float, strike: float):
-        estimator = {}
-        estimator["values"] = []
-        estimator["means"] = np.zeros(self.max_level + 1)
-        estimator["vars"] = np.zeros(self.max_level + 1)
-
-        h = self.T / self.M ** np.arange(self.max_level + 1)
-        N = np.zeros(self.max_level + 1, dtype=int)
-        initial_samples = 10_000
+    def estimate(self, target_error: float, model: Model, contract: Contract):
+        estimator = {
+            "values": [],  # List of np.ndarray
+            "means": np.zeros(self.max_level + 1),
+            "vars": np.zeros(self.max_level + 1),
+        }
+        samples_count = np.full(self.max_level + 1, self.default_sample_count, dtype=int)
+        h = contract.maturity / self.m ** np.arange(self.max_level + 1)
 
         # Step 1. Start with L = 0
-        L = 0
-
-        while L <= self.max_level:
+        level = 0
+        while level <= self.max_level:
             # Step 2. Estimate V_L using an initial number of N_L = 10^4 samples.
-            N[L] = initial_samples
-
-            if L == 0:
-                S = s + r * s * self.T + sigma * s * self.rng.normal(scale=np.sqrt(self.T), size=N[0])
-                estimator["values"].append(np.exp(-r * self.T) * call_payoff(S, strike))
-                estimator["means"][0] = np.mean(estimator["values"][0])
-                estimator["vars"][0] = np.var(estimator["values"][0], ddof=1)
-            else:
-                m_fine, m_coarse = self.M**L, self.M ** (L - 1)
-                dt_fine, dt_coarse = self.T / m_fine, self.T / m_coarse
-
-                # Generate Brownian Motion increments for level l
-                # In practice, faster than `np.random.randn`
-                dW_fine = self.rng.normal(scale=np.sqrt(dt_fine), size=(N[L], m_fine))
-
-                # Summation of Brownian increments in groups of 'M' to replicate the coarser increment
-                dW_coarse = np.sum(dW_fine.reshape(N[L], m_coarse, self.M), axis=2)
-
-                S_fine = sde_path(s, r, sigma, m_fine, dt_fine, dW_fine)
-                S_coarse = sde_path(s, r, sigma, m_coarse, dt_coarse, dW_coarse)
-
-                payoff_fine = call_payoff(S_fine, strike)
-                payoff_coarse = call_payoff(S_coarse, strike)
-
-                estimator["values"].append(np.exp(-r * self.T) * (payoff_fine - payoff_coarse))
-                estimator["means"][L] = np.mean(estimator["values"][L])
-                estimator["vars"][L] = np.var(estimator["values"][L], ddof=1)
+            v = self._level_estimator(level, samples_count[level], model, contract)
+            estimator["values"].append(v)
+            estimator["means"][level] = np.mean(v)
+            estimator["vars"][level] = np.var(v, ddof=1)
 
             # Step 3. Define optimal N_l, l = 0, 1, ..., L, using the Equation (12)
-            new_N = np.zeros(self.max_level + 1, dtype=int)
-            for l in range(L + 1):
-                c1 = 2 * self.eps ** (-2) * np.sqrt(estimator["vars"][l] * h[l])
-                c2 = np.sum(np.sqrt(estimator["vars"][: L + 1] / h[: L + 1]))
-                new_N[l] = np.ceil(c1 * c2).astype(int)
-
-            # print(f"L: {L} | New Nl: {new_N}")
+            optimal_samples_count = self._compute_optimal_samples(level, estimator["vars"], h, target_error)
 
             # Step 4. Evaluate extra samples at each level as needed for new N_l
-            for l in range(L + 1):
-                if N[L] > new_N[l]:
-                    # Truncate
-                    estimator["values"][l] = estimator["values"][l][:new_N[l]]
-                    estimator["means"][l] = np.mean(estimator["values"][l])
-                    estimator["vars"][l] = np.var(estimator["values"][l], ddof=1)
-                    N[l] = new_N[l]
+            for l in range(len(optimal_samples_count)):
+                if samples_count[l] > optimal_samples_count[l]:
+                    samples_count[l] = optimal_samples_count[l]
                     continue
 
-                extra_samples = new_N[l] - N[l]
-                N[l] = new_N[l]
-                if l == 0:
-                    S = s + r * s * self.T + sigma * s * self.rng.normal(scale=np.sqrt(self.T), size=extra_samples)
-                    np.append(estimator["values"][0], np.exp(-r * self.T) * call_payoff(S, strike))
-                    estimator["means"][0] = np.mean(estimator["values"][0])
-                    estimator["vars"][0] = np.var(estimator["values"][0], ddof=1)
-                else:
-                    m_fine, m_coarse = self.M**l, self.M ** (l - 1)
-                    dt_fine, dt_coarse = self.T / m_fine, self.T / m_coarse
+                extra_samples = optimal_samples_count[l] - samples_count[l]
+                samples_count[l] += extra_samples
+                v = self._level_estimator(l, extra_samples, model, contract)
 
-                    # Generate Brownian Motion increments for level l
-                    # In practice, faster than `np.random.randn`
-                    dW_fine = self.rng.normal(scale=np.sqrt(dt_fine), size=(extra_samples, m_fine))
-
-                    # Summation of Brownian increments in groups of 'M' to replicate the coarser increment
-                    dW_coarse = np.sum(dW_fine.reshape(extra_samples, m_coarse, self.M), axis=2)
-
-                    S_fine = sde_path(s, r, sigma, m_fine, dt_fine, dW_fine)
-                    S_coarse = sde_path(s, r, sigma, m_coarse, dt_coarse, dW_coarse)
-
-                    payoff_fine = call_payoff(S_fine, strike)
-                    payoff_coarse = call_payoff(S_coarse, strike)
-
-                    np.append(estimator["values"][L], np.exp(-r * self.T) * (payoff_fine - payoff_coarse))
-                    estimator["means"][L] = np.mean(estimator["values"][L])
-                    estimator["vars"][L] = np.var(estimator["values"][L], ddof=1)
+                estimator["values"][l] = np.append(estimator["values"][l], v)
+                estimator["means"][l] = np.mean(estimator["values"][l])
+                estimator["vars"][l] = np.var(estimator["values"][l], ddof=1)
 
             # Step 5. If L >= 2, test for convergence using Equation (10) or (11)
-            if L >= 2:
-                # Equation (10)
-                test = max(np.abs(estimator["means"][L - 1]) / self.M, np.abs(estimator["means"][L]))
-                if test < (self.M - 1) * self.eps / np.sqrt(2):
-                    break
-
-                # Equation (11)
-                # diff = np.abs(estimator["means"][L] - estimator["means"][L - 1] / self.M)
-                # if diff < (self.M**2 - 1) * self.eps / np.sqrt(2):
-                #     break
+            if level >= 2 and self._has_converged(target_error, estimator, level):
+                break
 
             # Step 6. If L < 2, or it is not converged, increase L by 1 and go to Step 2
-            L += 1
+            level += 1
+        else:  # We have exited the loop without breaking
+            # TODO: Algorithm has not converged
+            level = self.max_level
 
-        return estimator, N, L
+        return estimator, samples_count, level
 
-    def estimate_call(self, s: float, r: float, sigma: float, strike: float, N: int):
-        L = self.max_level
-        M = self.M
-        T = self.T
+    def _level_estimator(self, level: int, sample_count: int, model: Model, contract: Contract):
+        def build_sample_path(dt: float, dw: np.ndarray) -> np.ndarray:
+            s = np.zeros((dw.shape[0], dw.shape[1] + 1))
+            s[:, 0] = model.initial_value
+            for i in range(dw.shape[1]):
+                drift = model.drift(i * dt, s[:, i]) * dt
+                diffusion = model.diffusion(i * dt, s[:, i]) * dw[:, i]
+                s[:, i + 1] = s[:, i] + drift + diffusion
 
-        estimators = []
-        estimators_mean = np.zeros(L + 1)
-        estimators_var = np.zeros(L + 1)
+            return s
 
-        # ---- Level 0 ----
-        S = s + r * s * T + sigma * s * self.rng.normal(scale=np.sqrt(T), size=N)
+        maturity = contract.maturity
+        discount = np.exp(-model.interest_rate * maturity)
+        if level == 0:
+            dw = self.rng.normal(scale=np.sqrt(maturity), size=(sample_count, 1))
+            s = build_sample_path(maturity, dw)
+            payoff = contract.payoff(s)
+            return discount * payoff
+        else:
+            m_fine, m_coarse = self.m**level, self.m ** (level - 1)
+            dt_fine, dt_coarse = maturity / m_fine, maturity / m_coarse
 
-        estimators.append(np.exp(-r * T) * call_payoff(S, strike))
-        estimators_mean[0] = np.mean(estimators[0])
-        estimators_var[0] = np.var(estimators[0], ddof=1)
+            dw_fine = self.rng.normal(scale=np.sqrt(dt_fine), size=(sample_count, m_fine))
+            dw_coarse = np.sum(dw_fine.reshape(sample_count, m_coarse, self.m), axis=2)
 
-        # ---- Levels 1..L ----
-        for l in range(1, L + 1):
-            m_fine, m_coarse = M**l, M ** (l - 1)
-            dt_fine, dt_coarse = T / m_fine, T / m_coarse
+            s_fine = build_sample_path(dt_fine, dw_fine)
+            s_coarse = build_sample_path(dt_coarse, dw_coarse)
 
-            # Generate Brownian Motion increments for level l
-            # In practice, faster than `np.random.randn`
-            dW_fine = self.rng.normal(scale=np.sqrt(dt_fine), size=(N, m_fine))
+            payoff_fine = contract.payoff(s_fine)
+            payoff_coarse = contract.payoff(s_coarse)
+            return discount * (payoff_fine - payoff_coarse)
 
-            # Summation of Brownian increments in groups of 'M' to replicate the coarser increment
-            dW_coarse = np.sum(dW_fine.reshape(N, m_coarse, M), axis=2)
+    def _compute_optimal_samples(self, level: int, vars: np.ndarray, h: np.ndarray, target_error: float) -> np.ndarray:
+        c1 = 2 * np.sqrt(vars[: level + 1] * h[: level + 1]) / target_error**2
+        c2 = np.sum(np.sqrt(vars[: level + 1] / h[: level + 1]))
+        optimal_samples_count = np.ceil(c1 * c2).astype(int)
+        return optimal_samples_count
 
-            S_fine = sde_path(s, r, sigma, m_fine, dt_fine, dW_fine)
-            S_coarse = sde_path(s, r, sigma, m_coarse, dt_coarse, dW_coarse)
-
-            payoff_fine = call_payoff(S_fine, strike)
-            payoff_coarse = call_payoff(S_coarse, strike)
-
-            estimators.append(np.exp(-r * T) * (payoff_fine - payoff_coarse))
-            estimators_mean[l] = np.mean(estimators[l])
-            estimators_var[l] = np.var(estimators[l], ddof=1)
-
-        return estimators_mean, estimators_var
-
-
-def main() -> None:
-    r = 0.05
-    sigma = 0.2
-    s0 = 1.0
-    K = 1.0
-    T = 1.0
-
-    # MLMC parameters
-    L = 4
-    N = 10_000
-    M = 4
-
-    # As in the paper
-    Eps = [0.001, 0.0005, 0.0002, 0.0001, 0.00005]
-
-    # For reproducibility
-    rng = np.random.default_rng()
-
-    # MLMC
-    for eps in Eps:
-        print(f"Running MLMC with eps={eps:.5f}")
-
-        mlmc_european = MLMCEuropean(eps, L, M, T, rng)
-        estimator, N, maxL = mlmc_european.estimate_call_adaptative(s0, r, sigma, K)
-
-        print(N)
-        print(np.sum(estimator["means"]))
-        print(np.sum(estimator["vars"]))
-        print()
-    return
-
-    # Classic Monte Carlo
-    steps = M**L
-    dt = T / steps
-    dW = rng.normal(scale=np.sqrt(dt), size=(N, steps))
-
-    S = sde_path(s0, r, sigma, steps, dt, dW)
-    payoff = np.exp(-r * T) * call_payoff(S, K)
-    p, v, s = np.mean(payoff), np.var(payoff, ddof=1), np.std(payoff, ddof=1)
-    print(f"==================================================")
-    print(f"Classic Monte Carlo: {p}")
-    print(f"Variance: {v / N}")
-    print(f"Standard deviation: {s / np.sqrt(N)}")
-    print(f"Confidence interval 95%: [{p - 1.96 * s / np.sqrt(N)}, {p + 1.96 * s / np.sqrt(N)}]")
-    print(f"Error: {100 * 1.96 * s / (p * np.sqrt(N))}%")
-
-    # Real BS price
-    print(f"==================================================")
-    bs_price = black_scholes_call_price(s0, r, sigma, K, T)
-    print(f"Exact Black-Scholes Price: {bs_price}")
-
-
-if __name__ == "__main__":
-    main()
+    def _has_converged(self, target_error: float, estimator: dict, level: int) -> bool:
+        if True:
+            # Equation (10)
+            left = max(np.abs(estimator["means"][level - 1]) / self.m, np.abs(estimator["means"][level]))
+            right = (self.m - 1) * target_error / np.sqrt(2)
+            return left < right
+        else:
+            # Equation (11)
+            raise NotImplementedError("Equation (11) not implemented yet")
