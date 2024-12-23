@@ -12,11 +12,8 @@ class MLMC:
         self.rng = rng
 
     def estimate(self, target_error: float, model: Model, contract: Contract):
-        estimator = {
-            "values": [],  # List of np.ndarray
-            "means": np.zeros(self.max_level + 1),
-            "vars": np.zeros(self.max_level + 1),
-        }
+        estimator = {"values": [], "means": np.zeros(self.max_level + 1), "vars": np.zeros(self.max_level + 1)}
+
         samples_count = np.full(self.max_level + 1, self.default_sample_count, dtype=int)
         h = contract.maturity / self.m ** np.arange(self.max_level + 1)
 
@@ -47,7 +44,7 @@ class MLMC:
                 estimator["vars"][l] = np.var(estimator["values"][l], ddof=1)
 
             # Step 5. If L >= 2, test for convergence using Equation (10) or (11)
-            if level >= 2 and self._has_converged(target_error, estimator, level):
+            if level >= 2 and self._has_converged(target_error, estimator["means"], level):
                 break
 
             # Step 6. If L < 2, or it is not converged, increase L by 1 and go to Step 2
@@ -56,6 +53,10 @@ class MLMC:
             # TODO: Algorithm has not converged
             level = self.max_level
 
+        # NOTE: For the cost computation, `_level_estimator` may return it's cost (e.g. sample count, cpu time)
+        costs_m = self.m ** np.arange(1, level + 1) + self.m ** np.arange(level)
+        cost = samples_count[0] + np.dot(samples_count[1 : level + 1], costs_m)
+        estimator["cost"] = cost
         return estimator, samples_count, level
 
     def _level_estimator(self, level: int, sample_count: int, model: Model, contract: Contract):
@@ -96,12 +97,13 @@ class MLMC:
         optimal_samples_count = np.ceil(c1 * c2).astype(int)
         return optimal_samples_count
 
-    def _has_converged(self, target_error: float, estimator: dict, level: int) -> bool:
+    def _has_converged(self, target_error: float, means: np.ndarray, level: int) -> bool:
         if True:
             # Equation (10)
-            left = max(np.abs(estimator["means"][level - 1]) / self.m, np.abs(estimator["means"][level]))
+            left = max(np.abs(means[level]), np.abs(means[level - 1]) / self.m)
             right = (self.m - 1) * target_error / np.sqrt(2)
-            return left < right
         else:
             # Equation (11)
-            raise NotImplementedError("Equation (11) not implemented yet")
+            left = np.abs(means[level] - means[level - 1] / self.m)
+            right = (self.m**2 - 1) * target_error / np.sqrt(2)
+        return left < right
