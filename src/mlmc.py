@@ -55,8 +55,13 @@ class MLMC:
 
         # NOTE: For the cost computation, `_level_estimator` may return it's cost (e.g. sample count, cpu time)
         costs_m = self.m ** np.arange(1, level + 1) + self.m ** np.arange(level)
-        cost = samples_count[0] + np.dot(samples_count[1: level + 1], costs_m)
+        cost = samples_count[0] + np.dot(samples_count[1 : level + 1], costs_m)
         estimator["cost"] = cost
+
+        # Truncate to the right size
+        estimator["means"] = estimator["means"][: level + 1]
+        estimator["vars"] = estimator["vars"][: level + 1]
+        samples_count = samples_count[: level + 1]
         return estimator, samples_count, level
 
     def _level_estimator(self, level: int, sample_count: int, model: Model, contract: Contract):
@@ -78,7 +83,7 @@ class MLMC:
             payoff = contract.payoff(s)
             return discount * payoff
         else:
-            m_fine, m_coarse = self.m ** level, self.m ** (level - 1)
+            m_fine, m_coarse = self.m**level, self.m ** (level - 1)
             dt_fine, dt_coarse = maturity / m_fine, maturity / m_coarse
 
             dw_fine = self.rng.normal(scale=np.sqrt(dt_fine), size=(sample_count, m_fine))
@@ -92,7 +97,7 @@ class MLMC:
             return discount * (payoff_fine - payoff_coarse)
 
     def _compute_optimal_samples(self, level: int, vars: np.ndarray, h: np.ndarray, target_error: float) -> np.ndarray:
-        c1 = 2 * np.sqrt(vars[: level + 1] * h[: level + 1]) / target_error ** 2
+        c1 = 2 * np.sqrt(vars[: level + 1] * h[: level + 1]) / target_error**2
         c2 = np.sum(np.sqrt(vars[: level + 1] / h[: level + 1]))
         optimal_samples_count = np.ceil(c1 * c2).astype(int)
         return optimal_samples_count
@@ -105,5 +110,5 @@ class MLMC:
         else:
             # Equation (11)
             left = np.abs(means[level] - means[level - 1] / self.m)
-            right = (self.m ** 2 - 1) * target_error / np.sqrt(2)
+            right = (self.m**2 - 1) * target_error / np.sqrt(2)
         return left < right

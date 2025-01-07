@@ -38,20 +38,22 @@ class EuropeanFDM(FDM):
         dt = contract.maturity / self.m
         x = np.linspace(xmin, xmax, self.l + 2)
 
-        d1 = model.diffusion(0, x[2:-1]) ** 2 / (2 * dx**2) - model.drift(0, x[2:-1]) / (2 * dx)
-        d2 = -(model.interest_rate + model.diffusion(0, x[1:-1]) ** 2 / dx**2)
-        d3 = model.diffusion(0, x[1:-2]) ** 2 / (2 * dx**2) + model.drift(0, x[1:-2]) / (2 * dx)
-        a = np.diag(d1 * np.ones(self.l - 1), -1) + np.diag(d2 * np.ones(self.l)) + np.diag(d3 * np.ones(self.l - 1), 1)
-
         f = np.zeros((self.l, self.m))
         f[0], f[-1] = boundary_min, boundary_max
 
-        i = np.eye(self.l)
-        c1 = i - theta * dt * a
-        c2 = i + (1 - theta) * dt * a
-
         u = contract.payoff(x, all_paths=False)
         for i in range(self.m):
+            d1 = model.diffusion(i * dt, x[2:-1]) ** 2 / (2 * dx**2) - model.drift(i * dt, x[2:-1]) / (2 * dx)
+            d2 = -(model.interest_rate + model.diffusion(0, x[1:-1]) ** 2 / dx**2)
+            d3 = model.diffusion(i * dt, x[1:-2]) ** 2 / (2 * dx**2) + model.drift(i * dt, x[1:-2]) / (2 * dx)
+            a = (
+                np.diag(d1 * np.ones(self.l - 1), -1)
+                + np.diag(d2 * np.ones(self.l))
+                + np.diag(d3 * np.ones(self.l - 1), 1)
+            )
+            c1 = np.eye(self.l) - theta * dt * a
+            c2 = np.eye(self.l) + (1 - theta) * dt * a
+
             u[1:-1] = np.dot(np.linalg.inv(c1), np.dot(c2, u[1:-1]) + dt * f[:, i])
 
         return x, u
