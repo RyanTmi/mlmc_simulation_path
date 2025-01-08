@@ -42,20 +42,20 @@ class EuropeanFDM(FDM):
         u = np.zeros((self.l + 2, self.m + 1))
         # Terminal condition
         u[:, -1] = contract.payoff(x, all_paths=False)
-        # Upper boundary
-        u[-1, :-1] = boundary_max
         # Lower boundary
         u[0, :-1] = boundary_min
+        # Upper boundary
+        u[-1, :-1] = boundary_max
 
         f = np.zeros((self.l, self.m))
-        f[0] = u[0, :-1] * (model.diffusion(t, x[-2]) ** 2 / (2 * dx**2) - model.drift(t, x[-2]) / (2 * dx))
-        f[-1] = u[-1, :-1] * (model.diffusion(t, x[1]) ** 2 / (2 * dx**2) + model.drift(t, x[1]) / (2 * dx))
+        f[0] = u[0, -1] * (model.diffusion(t, x[1]) ** 2 / (2 * dx**2) + model.drift(t, x[1]) / (2 * dx))
+        f[-1] = u[-1, :-1] * (model.diffusion(t, x[-2]) ** 2 / (2 * dx**2) - model.drift(t, x[-2]) / (2 * dx))
 
         for i in reversed(range(self.m)):
             # sub-diagonal
             d1 = model.diffusion(i * dt, x[2:-1]) ** 2 / (2 * dx**2) - model.drift(i * dt, x[2:-1]) / (2 * dx)
             # diagonal
-            d2 = -(model.interest_rate + model.diffusion(i * dt, x[1:-1]) ** 2 / dx**2)
+            d2 = -(model.interest_rate + (model.diffusion(i * dt, x[1:-1]) / dx) ** 2)
             # super-diagonal
             d3 = model.diffusion(i * dt, x[1:-2]) ** 2 / (2 * dx**2) + model.drift(i * dt, x[1:-2]) / (2 * dx)
             a = (
