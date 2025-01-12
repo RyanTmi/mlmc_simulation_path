@@ -10,7 +10,7 @@ from model import Model
 
 
 class FDM:
-    def __init__(self, l: int, m: int):
+    def __init__(self, l: int, m: int) -> None:
         self.l = l
         self.m = m
 
@@ -28,45 +28,51 @@ class EuropeanFDM(FDM):
         self,
         model: Model,
         contract: EuropeanContract,
-        xmin: float,
-        xmax: float,
+        xmin: float,  # alpha
+        xmax: float,  # beta
         boundary_min: float | np.ndarray = 0.0,
         boundary_max: float | np.ndarray = 0.0,
         theta: float = 0.5,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         dx = (xmax - xmin) / (self.l + 1)
         dt = contract.maturity / self.m
         x = np.linspace(xmin, xmax, self.l + 2)
         t = np.linspace(0, contract.maturity, self.m + 1)
 
         u = np.zeros((self.l + 2, self.m + 1))
-        # Terminal condition
-        u[:, -1] = contract.payoff(x, all_paths=False)
-        # Lower boundary
-        u[0, :-1] = boundary_min
-        # Upper boundary
-        u[-1, :-1] = boundary_max
+        u[:, -1] = contract.payoff(x, all_paths=False)  # Terminal condition
+        u[0, :-1] = boundary_min  # Lower boundary
+        u[-1, :-1] = boundary_max  # Upper boundary
 
-        f = np.zeros((self.l, self.m))
-        f[0] = u[0, -1] * (model.diffusion(t, x[1]) ** 2 / (2 * dx**2) + model.drift(t, x[1]) / (2 * dx))
-        f[-1] = u[-1, :-1] * (model.diffusion(t, x[-2]) ** 2 / (2 * dx**2) - model.drift(t, x[-2]) / (2 * dx))
-
+        x_interior = x[1:-1]
+        d1_next, _, d3_next, a_next = self._build_operator(model, t[-1], x_interior, dx)
         for i in reversed(range(self.m)):
-            # sub-diagonal
-            d1 = model.diffusion(i * dt, x[2:-1]) ** 2 / (2 * dx**2) - model.drift(i * dt, x[2:-1]) / (2 * dx)
-            # diagonal
-            d2 = -(model.interest_rate + (model.diffusion(i * dt, x[1:-1]) / dx) ** 2)
-            # super-diagonal
-            d3 = model.diffusion(i * dt, x[1:-2]) ** 2 / (2 * dx**2) + model.drift(i * dt, x[1:-2]) / (2 * dx)
-            a = (
-                np.diag(d1 * np.ones(self.l - 1), -1)
-                + np.diag(d2 * np.ones(self.l))
-                + np.diag(d3 * np.ones(self.l - 1), 1)
-            )
+            d1_curr, _, d3_curr, a_curr = self._build_operator(model, t[i], x_interior, dx)
 
-            c1 = np.eye(self.l) - theta * dt * a
-            c2 = np.eye(self.l) + (1 - theta) * dt * a
+            c1 = np.eye(self.l) - theta * dt * a_curr
+            c2 = np.eye(self.l) + (1 - theta) * dt * a_next
 
-            u[1:-1, i] = np.dot(np.linalg.inv(c1), np.dot(c2, u[1:-1, i + 1]) + dt * f[:, i])
+            rhs = np.dot(c2, u[1:-1, i + 1])
+            rhs[0] += dt * (theta * d1_curr[0] * u[0, i] + (1 - theta) * d1_next[0] * u[0, i + 1])
+            rhs[-1] += dt * (theta * d3_curr[-1] * u[-1, i] + (1 - theta) * d3_next[-1] * u[-1, i + 1])
 
-        return x, t, u
+            u[1:-1, i] = np.linalg.solve(c1, rhs)
+            d1_next, d3_next, a_next = d1_curr, d3_curr, a_curr
+
+        return t, x, u
+
+    def _build_operator(
+        self, model: Model, time: float, x_interior: np.ndarray, dx: float
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        diffusion = model.diffusion(time, x_interior)
+        drift = model.drift(time, x_interior)
+
+        alpha = 0.5 * (diffusion / dx) ** 2
+        beta = 0.5 * (drift / dx)
+
+        d1 = alpha - beta
+        d2 = -(2.0 * alpha + model.interest_rate)
+        d3 = alpha + beta
+
+        a = np.diag(d1[1:], k=-1) + np.diag(d2, k=0) + np.diag(d3[:-1], k=1)
+        return d1, d2, d3, a

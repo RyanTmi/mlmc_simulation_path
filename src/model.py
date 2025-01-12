@@ -13,11 +13,11 @@ class Model(ABC):
         self.dimension = np.size(initial_value)
 
     @abstractmethod
-    def drift(self, t: float, x: np.ndarray) -> np.ndarray:
+    def drift(self, t: float | np.ndarray, x: np.ndarray) -> np.ndarray:
         pass
 
     @abstractmethod
-    def diffusion(self, t: float, x: np.ndarray) -> np.ndarray:
+    def diffusion(self, t: float | np.ndarray, x: np.ndarray) -> np.ndarray:
         pass
 
 
