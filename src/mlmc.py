@@ -3,6 +3,10 @@ import numpy as np
 from model import Model
 from contract import Contract
 
+# ======================================================================================================================
+# MLMC
+# ======================================================================================================================
+
 
 class MLMC:
     def __init__(self, max_level: int, m: int, default_sample_count: int, rng: np.random.Generator):
@@ -111,4 +115,188 @@ class MLMC:
             # Equation (11)
             left = np.abs(means[level] - means[level - 1] / self.m)
             right = (self.m**2 - 1) * target_error / np.sqrt(2)
+        return left < right
+
+
+class GaussianGenerator:
+    def __init__(self) -> None:
+        self._index = 0
+
+    def reset(self) -> None:
+        self._index = 0
+
+
+class MonteCarloEstimator:
+
+    def __init__(self, max_level: int, m: int, default_sample_count: int, rng: np.random.Generator):
+        self.max_level = max_level
+        self.m = m
+        self.default_sample_count = default_sample_count
+        self.rng = rng
+
+    def computations_for_plots(self, model: Model, contract: Contract, sample_count: int, level: int) -> dict:
+        self.model = model
+        self.contract = contract
+        estimator = {
+            "means": np.array([]),  # E[Y_l]
+            "vars": np.array([]),  # Var(Y_l)
+            "payoffs": np.array([]),  # P_l
+        }
+
+        for l in range(level):
+            payoffs = self._sample_payoffs(sample_count, l)
+            estimator["payoffs"] = np.append(estimator["payoffs"], payoffs)
+            estimator["means"] = np.append(estimator["means"], np.mean(payoffs))
+            estimator["vars"] = np.append(estimator["vars"], np.var(payoffs, ddof=1))
+
+        means = estimator["means"]
+        means_richardson = np.array([means[i + 1] - means[i] / self.m for i in range(level - 2)])
+        estimator["means_richardson"] = means_richardson
+
+        return estimator
+
+    def compute_multilevel_estimator(
+        self, model: Model, contract: Contract, target_error: float, richardson_extrapolation: bool
+    ) -> tuple[dict, np.ndarray]:
+        self.model = model
+        self.contract = contract
+        self.target_error = target_error
+        self.richardson_extrapolation = richardson_extrapolation
+
+        estimator = {
+            "means": np.array([]),  # E[Y_l]
+            "vars": np.array([]),  # Var(Y_l)
+            "payoffs": np.array([]),  # P_l
+        }
+        h = contract.maturity / self.m ** np.arange(self.max_level + 1)
+
+        samples = []
+        level = 0
+        while level <= self.max_level:
+            payoffs = self._sample_payoffs(self.default_sample_count, level)
+            estimator["payoffs"] = np.append(estimator["payoffs"], payoffs)
+            estimator["means"] = np.append(estimator["means"], np.mean(payoffs))
+            estimator["vars"] = np.append(estimator["vars"], np.var(payoffs, ddof=1))
+
+            optimal_samples = self._compute_optimal_samples(level, estimator["vars"], h, target_error)
+            for l in range(len(optimal_samples)):
+                if samples[l] > optimal_samples[l]:
+                    samples[l] = optimal_samples[l]
+                    continue
+
+                extra_samples = optimal_samples[l] - samples[l]
+                samples[l] += extra_samples
+
+                payoffs = self._sample_payoffs(extra_samples, l)
+                estimator["payoffs"][l] = np.append(estimator["values"][l], payoffs)
+                estimator["means"][l] = np.mean(estimator["values"][l])
+                estimator["vars"][l] = np.var(estimator["values"][l], ddof=1)
+
+            if level >= 2 and self._has_converged(target_error, estimator["means"], level):
+                break
+
+            level += 1
+
+        estimator["value"] = np.sum(estimator["means"])
+        if richardson_extrapolation:
+            estimator["value"] += estimator["means"][-1] / (self.m - 1)
+
+        return estimator, samples
+
+    def compute_standard_estimator(
+        self, model: Model, contract: Contract, target_error: float, richardson_extrapolation: bool
+    ) -> tuple[dict, np.ndarray]:
+        self.model = model
+        self.contract = contract
+        self.target_error = target_error
+        self.richardson_extrapolation = richardson_extrapolation
+
+        estimator = {"means": np.array([])}
+
+        samples = []
+        level = 0
+        while level < self.max_level:
+            dt = self.contract.maturity / self.m**level
+            dw = self.rng.normal(scale=dt, size=(self.default_sample_count, self.m**level, self.model.dimension))
+
+            s = self._build_sample_path(dt, dw)
+            payoffs = self.contract.payoff(s)
+            estimator["means"] = np.append(estimator["means"], np.mean(payoffs))
+
+            var = np.var(payoffs)
+            optimal_samples = int(np.ceil(2 * var / target_error**2))
+            samples.append(optimal_samples)
+            if optimal_samples > self.default_sample_count:
+                extra_samples = optimal_samples - self.default_sample_count
+                dw_extra = self.rng.normal(scale=dt, size=(extra_samples, self.m**level, self.model.dimension))
+                s_extra = self._build_sample_path(dt, dw_extra)
+                payoffs_extra = self.contract.payoff(s_extra)
+                estimator["means"][-1] = np.mean(np.concatenate((payoffs, payoffs_extra)))
+
+            if level >= 2 and self._test_convergence_std():
+                break
+
+            level += 1
+
+        return estimator, samples
+
+    def _sample_payoffs(self, sample_count: int, level: int):
+        maturity = self.contract.maturity
+        discount = np.exp(-self.model.interest_rate * maturity)
+
+        if level == 0:
+            dw = self.rng.normal(scale=np.sqrt(maturity), size=(sample_count, 1, self.model.dimension))
+            s = self._build_sample_path(maturity, dw)
+            payoff = self.contract.payoff(s)
+            return discount * payoff
+        else:
+            m_fine, m_coarse = self.m**level, self.m ** (level - 1)
+            dt_fine, dt_coarse = maturity / m_fine, maturity / m_coarse
+
+            dw_fine = self.rng.normal(scale=np.sqrt(dt_fine), size=(sample_count, m_fine, self.model.dimension))
+            dw_coarse = np.sum(dw_fine.reshape(sample_count, m_coarse, self.m, self.model.dimension), axis=2)
+
+            s_fine = self._build_sample_path(dt_fine, dw_fine)
+            s_coarse = self._build_sample_path(dt_coarse, dw_coarse)
+
+            payoff_fine = self.contract.payoff(s_fine)
+            payoff_coarse = self.contract.payoff(s_coarse)
+            return discount * (payoff_fine - payoff_coarse)
+
+    def _build_sample_path(self, dt: float, dw: np.ndarray) -> np.ndarray:
+        s = np.zeros((dw.shape[0], dw.shape[1] + 1, dw.shape[2]))
+        s[:, 0] = self.model.initial_value
+        for i in range(dw.shape[1]):
+            drift = np.apply_along_axis(lambda x: self.model.drift(i * dt, x), axis=1, arr=s[:, i])
+            diffusion = np.apply_along_axis(lambda x: self.model.diffusion(i * dt, x), axis=1, arr=s[:, i])
+
+            s[:, i + 1] = s[:, i] + drift * dt + diffusion * dw[:, i]
+            # s[:, i + 1] = s[:, i] + drift * dt + np.einsum("ijk,ik->ij", diffusion, dw[:, i])
+
+        return s
+
+    def _compute_optimal_samples(self, level: int, vars: np.ndarray, h: np.ndarray, target_error: float) -> np.ndarray:
+        c1 = 2 * np.sqrt(vars[: level + 1] * h[: level + 1]) / target_error**2
+        c2 = np.sum(np.sqrt(vars[: level + 1] / h[: level + 1]))
+        optimal_samples_count = np.ceil(c1 * c2).astype(int)
+        return optimal_samples_count
+
+    def _has_converged(self, target_error: float, means: np.ndarray, level: int) -> bool:
+        if self.richardson_extrapolation:
+            # Equation (11)
+            left = np.abs(means[level] - means[level - 1] / self.m)
+            right = (self.m**2 - 1) * target_error / np.sqrt(2)
+        else:
+            # Equation (10)
+            left = max(np.abs(means[level]), np.abs(means[level - 1]) / self.m)
+            right = (self.m - 1) * target_error / np.sqrt(2)
+        return left < right
+
+    def _test_convergence_std(self, target_error: float, means: np.ndarray, level: int) -> bool:
+        if self.richardson_extrapolation:
+            left = max(np.abs(means[level]), np.abs(means[level - 1]) / self.m)
+            right = (self.m - 1) * target_error / np.sqrt(2)
+        else:
+            left = max(np.abs(means[level]), np.abs(means[level - 1]) / self.m)
+            right = (self.m - 1) * target_error / np.sqrt(2)
         return left < right

@@ -42,7 +42,7 @@ class EuropeanCall(EuropeanContract):
 
     def payoff(self, paths: np.ndarray, all_paths: bool = True) -> np.ndarray:
         if all_paths:
-            return np.maximum(paths[:, -1] - self.strike, 0.0)
+            return np.maximum(paths[:, -1, 0] - self.strike, 0.0)
         else:
             return np.maximum(paths - self.strike, 0.0)
 
@@ -61,7 +61,7 @@ class EuropeanPut(EuropeanContract):
 
     def payoff(self, paths: np.ndarray, all_paths: bool = True) -> np.ndarray:
         if all_paths:
-            return np.maximum(self.strike - paths[:, -1], 0.0)
+            return np.maximum(self.strike - paths[:, -1, 0], 0.0)
         else:
             return np.maximum(self.strike - paths, 0.0)
 
@@ -90,7 +90,7 @@ class AsianCall(AsianContract):
         super().__init__(maturity, strike)
 
     def payoff(self, paths: np.ndarray) -> np.ndarray:
-        return np.maximum(np.mean(paths, axis=1) - self.strike, 0)
+        return np.maximum(np.mean(paths[:, :, 0], axis=1) - self.strike, 0)
 
     def name(self) -> str:
         return "Asian Call"
@@ -106,7 +106,7 @@ class AsianPut(AsianContract):
         super().__init__(maturity, strike)
 
     def payoff(self, paths: np.ndarray) -> np.ndarray:
-        return np.maximum(self.strike - np.mean(paths, axis=1), 0)
+        return np.maximum(self.strike - np.mean(paths[:, :, 0], axis=1), 0)
 
     def name(self) -> str:
         return "Asian Put"
@@ -142,7 +142,7 @@ class Digital(Contract):
         super().__init__(maturity)
 
     def payoff(self, paths: np.ndarray) -> np.ndarray:
-        return np.heaviside(paths[:, -1] - 1, 0)
+        return np.heaviside(paths[:, -1, 0] - 1, 0)
 
     def name(self) -> str:
         return "Digital"

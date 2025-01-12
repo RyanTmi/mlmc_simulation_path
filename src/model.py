@@ -47,7 +47,7 @@ class Heston(Model):
     def __init__(
         self,
         interest_rate: float,
-        initial_value: float | np.ndarray,
+        initial_value: np.ndarray,
         sigma: float,
         lbd: float,
         xi: float,
