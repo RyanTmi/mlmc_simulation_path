@@ -26,6 +26,7 @@ class Contract(ABC):
 
 
 class EuropeanContract(Contract):
+    @abstractmethod
     def __init__(self, maturity: float, strike: float):
         super().__init__(maturity)
         self.strike = strike
@@ -75,6 +76,7 @@ class EuropeanPut(EuropeanContract):
 
 
 class AsianContract(Contract):
+    @abstractmethod
     def __init__(self, maturity: float, strike: float):
         super().__init__(maturity)
         self.strike = strike
@@ -86,11 +88,16 @@ class AsianContract(Contract):
 
 
 class AsianCall(AsianContract):
-    def __init__(self, maturity: float, strike: float) -> None:
+    def __init__(self, maturity: float, strike: float, approximation_type: str = "t") -> None:
         super().__init__(maturity, strike)
+        self.approximation_type = approximation_type
 
     def payoff(self, paths: np.ndarray) -> np.ndarray:
-        return np.maximum(np.mean(paths[:, :, 0], axis=1) - self.strike, 0)
+        dt = self.maturity / (paths.shape[1] - 1)
+        if self.approximation_type == "t":
+            return np.maximum(dt * np.sum(paths[:, 1:, 0] + paths[:, :-1, 0], axis=1) / 2.0 - self.strike, 0.0)
+        else:
+            return np.maximum(np.mean(paths[:, :, 0], axis=1) - self.strike, 0)
 
     def name(self) -> str:
         return "Asian Call"

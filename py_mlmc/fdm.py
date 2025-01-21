@@ -1,3 +1,5 @@
+from abc import abstractmethod
+
 import numpy as np
 
 from contract import EuropeanContract
@@ -10,6 +12,7 @@ from model import Model
 
 
 class FDM:
+    @abstractmethod
     def __init__(self, l: int, m: int) -> None:
         self.l = l
         self.m = m
@@ -62,10 +65,14 @@ class EuropeanFDM(FDM):
         return t, x, u
 
     def _build_operator(
-        self, model: Model, time: float, x_interior: np.ndarray, dx: float
+        self,
+        model: Model,
+        time: float,
+        x_interior: np.ndarray,
+        dx: float,
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        diffusion = model.diffusion(time, x_interior)
         drift = model.drift(time, x_interior)
+        diffusion = model.diffusion(time, x_interior)[:, 0]
 
         alpha = 0.5 * (diffusion / dx) ** 2
         beta = 0.5 * (drift / dx)
